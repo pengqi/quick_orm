@@ -53,7 +53,7 @@ class Database(object):
                             if getattr(self, parent._readable_name).real_type == model._readable_name else None))(parent, model))
         models[:] = []
 
-    def __init__(self, connection_string, **kwargs):
+    def __init__(self, connection_string):
         """Initiate a database engine which is very low level, and a database session which deals with orm."""
 
         # Solve an issue with mysql character encoding(maybe it's a bug of MySQLdb)
@@ -62,7 +62,7 @@ class Database(object):
             raise ValueError("""No charset was specified for a mysql connection string.
 Please specify something like '?charset=utf8' explicitly.""")
 
-        self.engine = create_engine(connection_string, convert_unicode = True, encoding = 'utf-8', **kwargs)
+        self.engine = create_engine(connection_string, convert_unicode = True, encoding = 'utf-8')
         self.session = SessionExtension.extend(scoped_session(sessionmaker(autocommit = False, autoflush = False, bind = self.engine)))
 
     @staticmethod
@@ -74,10 +74,7 @@ Please specify something like '?charset=utf8' explicitly.""")
             backref_name is the name used to back ref the "many" side.
             one_to_one is this foreign_key for a one-to-one relationship?
         """
-        if isinstance(ref_model, str):
-            ref_model_name = ref_model
-        else:
-            ref_model_name = ref_model.__name__
+        ref_model_name = ref_model.__name__
         ref_table_name = StringUtil.camelcase_to_underscore(ref_model_name)
         ref_name = ref_name or ref_table_name
         foreign_key = '{0}_id'.format(ref_name)
@@ -100,13 +97,13 @@ Please specify something like '?charset=utf8' explicitly.""")
                     ref_model._one_to_models.append(cls)
             model_name = cls.__name__
             table_name = cls._readable_name
-            setattr(cls, foreign_key, Column(Integer, ForeignKey('{0}.id'.format(ref_table_name), ondelete = "CASCADE")))
+            setattr(cls, foreign_key, Column(Integer, ForeignKey('{0}.{1}'.format(ref_table_name, ref_model.__id__), ondelete = "CASCADE")))
             my_backref_name = backref_name or (table_name if one_to_one else '{0}s'.format(table_name))
             backref_options = dict(uselist = False) if one_to_one else dict(lazy = 'dynamic')
             backref_options['cascade'] = 'all'
             setattr(cls, ref_name, relationship(ref_model_name,
-                primaryjoin = '{0}.{1} == {2}.id'.format(model_name, foreign_key, ref_model_name),
-                backref = backref(my_backref_name, **backref_options), remote_side = '{0}.id'.format(ref_model_name)))
+                primaryjoin = '{0}.{1} == {2}.{3}'.format(model_name, foreign_key, ref_model_name, ref_model.__id__),
+                backref = backref(my_backref_name, **backref_options), remote_side = '{0}.{1}'.format(ref_model_name, ref_model.__id__)))
             return cls
         return ref_table
 
@@ -127,10 +124,7 @@ Please specify something like '?charset=utf8' explicitly.""")
             backref_name is how the destination model reference this model.
             middle_table_name is the middle table name of this many-to-many relationship.
         """
-        if isinstance(ref_model, str):
-            ref_model_name = ref_model
-        else:
-            ref_model_name = ref_model.__name__
+        ref_model_name = ref_model.__name__
         ref_table_name = StringUtil.camelcase_to_underscore(ref_model_name)
         ref_name = ref_name or '{0}s'.format(ref_table_name)
         def ref_table(cls):
@@ -150,14 +144,14 @@ Please specify something like '?charset=utf8' explicitly.""")
                 left_column_name = '{0}_id'.format(table_name)
                 right_column_name = '{0}_id'.format(ref_table_name)
             middle_table = Table(my_middle_table_name, Database.Base.metadata,
-                Column(left_column_name, Integer, ForeignKey('{0}.id'.format(table_name), ondelete = "CASCADE"), primary_key = True),
-                Column(right_column_name, Integer, ForeignKey('{0}.id'.format(ref_table_name), ondelete = "CASCADE"), primary_key = True))
+                Column(left_column_name, Integer, ForeignKey('{0}.{1}'.format(table_name, cls.__id__), ondelete = "CASCADE"), primary_key = True),
+                Column(right_column_name, Integer, ForeignKey('{0}.{1}'.format(ref_table_name, ref_model.__id__), ondelete = "CASCADE"), primary_key = True))
 
             my_backref_name = backref_name or '{0}s'.format(table_name)
             parameters = dict(secondary = middle_table, lazy = 'dynamic', backref = backref(my_backref_name, lazy = 'dynamic'))
             if table_name == ref_table_name:
-                parameters['primaryjoin'] = cls.id == middle_table.c.left_id
-                parameters['secondaryjoin'] = cls.id == middle_table.c.right_id
+                parameters['primaryjoin'] = getattr(cls, cls.__id__) == middle_table.c.left_id
+                parameters['secondaryjoin'] = getattr(cls, cls.__id__) == middle_table.c.right_id
 
             setattr(cls, ref_name, relationship(ref_model_name, **parameters))
 
@@ -178,8 +172,9 @@ Please specify something like '?charset=utf8' explicitly.""")
             seen = set()
             bases = tuple(base for base in bases if not base in seen and not seen.add(base))
 
+            attrs['__id__'] = __id__ = attrs.get('__id__', 'id')
             attrs['__tablename__'] = StringUtil.camelcase_to_underscore(name)
-            attrs['id'] = Column(Integer, primary_key = True)
+            attrs[__id__] = Column(Integer, primary_key = True)
             attrs['created_at'] = Column(DateTime)
             attrs['updated_at'] = Column(DateTime)
             attrs['_readable_name'] = attrs['__tablename__']
@@ -194,9 +189,9 @@ Please specify something like '?charset=utf8' explicitly.""")
                     base.real_type = Column('real_type', String(24), nullable = False, index = True)
                     base.__mapper_args__['polymorphic_on'] = base.real_type
                     base.__mapper_args__['polymorphic_identity'] = base._readable_name
-                attrs['id'] = Column(Integer, ForeignKey('{0}.id'.format(base._readable_name), ondelete = "CASCADE"), primary_key = True)
+                attrs[__id__] = Column(Integer, ForeignKey('{0}.{1}'.format(base._readable_name, base.__id__), ondelete = "CASCADE"), primary_key = True)
                 attrs['__mapper_args__']['polymorphic_identity'] = attrs['_readable_name']
-                attrs['__mapper_args__']['inherit_condition'] = attrs['id'] == base.id
+                attrs['__mapper_args__']['inherit_condition'] = attrs[__id__] == getattr(base, base.__id__)
 
             return MyDeclarativeMeta.__new__(cls, name, bases, attrs)
 
